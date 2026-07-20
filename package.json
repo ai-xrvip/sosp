@@ -1,7 +1,7 @@
-{
+﻿{
   "name": "sosp",
   "version": "1.0.0",
-  "description": "JAV Telegram Bot with m3u8 streaming proxy",
+  "description": "JAV Telegram Bot with proxy pool & CF bypass",
   "main": "index.cjs",
   "scripts": {
     "start": "node index.cjs"
@@ -9,6 +9,7 @@
   "dependencies": {
     "express": "^4.21.0",
     "node-telegram-bot-api": "^0.66.0",
-    "playwright": "^1.52.0"
+    "playwright": "^1.52.0",
+    "socks-proxy-agent": "^8.0.5"
   }
 }
