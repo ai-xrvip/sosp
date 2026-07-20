@@ -58,11 +58,11 @@ async function initBrowser(proxyAddr) {
 
     console.log('[Browser] Warming up on missav.ai...');
     let ok = false;
-    for (let i = 0; i < 15; i++) {
+    const mr = proxyAddr ? 5 : 12; for (let i = 0; i < mr; i++) {
       try {
-        await pg.goto('https://missav.ai', { waitUntil: 'domcontentloaded', timeout: 15000 });
+        await pg.goto('https://missav.ai', { waitUntil: 'domcontentloaded', timeout: proxyAddr ? 10000 : 15000 });
       } catch(e) {}
-      await pg.waitForTimeout(2000);
+      await pg.waitForTimeout(proxyAddr ? 1500 : 2000);
       const title = await pg.title();
       const content = await pg.content();
       if (!isCfPage(title) && (title.indexOf('MissAV') !== -1 || content.indexOf('missav') !== -1)) {
@@ -306,7 +306,6 @@ bot.on('message', async msg => {
 app.listen(PORT, async () => {
   console.log('[Server] on port ' + PORT);
 
-  // Step 1: Refresh proxy pool first
   console.log('[Startup] Step 1: Refreshing proxy pool...');
   try {
     await proxyPool.refreshPool();
@@ -315,20 +314,30 @@ app.listen(PORT, async () => {
     console.error('[Startup] Pool refresh error:', e.message);
   }
 
-  // Step 2: Start periodic pool refresh
   setInterval(() => {
     proxyPool.refreshPool().catch(e => console.error('[Pool] Periodic refresh error:', e.message));
   }, 10 * 60 * 1000);
 
-  // Step 3: Init browser with proxy if available
-  const proxy = proxyPool.getRandomProxy();
-  console.log('[Startup] Step 2: Starting browser' + (proxy ? ' with proxy: ' + proxy : ' without proxy'));
-  try {
-    await initBrowser(proxy);
-    if (proxy) proxyPool.markProxySuccess(proxy);
-  } catch(e) {
-    console.error('[Startup] Browser init error:', e.message);
+  const proxiesToTry = [''];
+  let p = proxyPool.getRandomProxy();
+  while (p) {
+    proxiesToTry.push(p);
+    p = proxyPool.getRandomProxy();
+    if (proxiesToTry.length >= 15) break;
+  }
+  const unique = [...new Set(proxiesToTry)];
+
+  let started = false;
+  for (let i = 0; i < unique.length && !started; i++) {
+    const proxy = unique[i] || null;
+    console.log('[Startup] Starting browser' + (proxy ? ' with proxy: ' + proxy : ' without proxy') + ' (attempt ' + (i+1) + '/' + unique.length + ')');
+    try {
+      started = await initBrowser(proxy);
+      if (proxy && started) proxyPool.markProxySuccess(proxy);
+    } catch(e) {
+      console.error('[Startup] Attempt ' + (i+1) + ' error:', e.message.substring(0, 60));
+    }
   }
 
-  console.log('[Startup] Complete. Bot ready.');
+  console.log('[Startup] Complete. Browser warmup:', started ? 'SUCCESS' : 'FAILED');
 });
