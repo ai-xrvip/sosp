@@ -70,33 +70,41 @@ async function scrapeJav(code) {
   code = code.toUpperCase();
   await ensureSession();
 
+  var ar = pg.request;
+  var html = null;
+
+  // Try fetching via API request first (fast, no page navigation)
   try {
-    await pg.goto("https://missav.ai/" + code.toLowerCase(), { waitUntil: "domcontentloaded", timeout: 30000 });
+    var url = "https://missav.ai/" + code.toLowerCase();
+    var resp = await ar.get(url, { headers: { Referer: "https://missav.ai/" } });
+    if (resp.ok()) {
+      html = await resp.text();
+    }
   } catch(e) {
-    console.error("[Scrape] goto failed:", e.message);
-    // Try once more with a new page
+    console.log("[Scrape] API fetch failed:", e.message);
+  }
+
+  // Fallback: navigate with page (handles JS challenge)
+  if (!html || html.indexOf("m3u8|") === -1) {
+    console.log("[Scrape] API fetch no m3u8, trying page navigation");
     try {
-      pg = await ctx.newPage();
-      await pg.goto("https://missav.ai/" + code.toLowerCase(), { waitUntil: "domcontentloaded", timeout: 30000 });
+      await pg.goto("https://missav.ai/" + code.toLowerCase(), { waitUntil: "domcontentloaded", timeout: 45000 });
+      await pg.waitForTimeout(3000);
+      html = await pg.content();
     } catch(e2) {
-      throw new Error("Cannot load page: " + e2.message);
+      console.log("[Scrape] Navigation also failed:", e2.message);
+      return null;
     }
   }
 
-  lastActivity = Date.now();
-  var html = await pg.content();
-
-  // Extract UUID using string search (avoids regex escaping issues)
+  // Extract UUID
   var idx = html.indexOf("m3u8|");
   if (idx === -1) {
-    // Log page snippet for debugging
-    var snippet = html.substring(0, 500);
-    console.error("[Scrape] No m3u8| pattern found in page for", code);
+    console.log("[Scrape] No m3u8| pattern for", code);
     return null;
   }
   var section = html.substring(idx, idx + 200);
   var parts = section.split("|");
-  // parts[0]="m3u8", parts[1:-5] = hex chunks, then ["com","surrit","https","video"]
   var hexParts = [];
   for (var i = 1; i < parts.length; i++) {
     if (parts[i] === "com") break;
@@ -104,22 +112,19 @@ async function scrapeJav(code) {
   }
   var uuid = hexParts.reverse().join("-");
   if (!uuid || uuid.length < 20) {
-    console.error("[Scrape] Invalid UUID for", code, ":", uuid);
+    console.log("[Scrape] Invalid UUID:", uuid);
     return null;
   }
 
   var titleMatch = html.match(/og:title"\s+content="([^"]+)"/);
   var coverMatch = html.match(/og:image"\s+content="([^"]+)"/);
-  var title = titleMatch ? titleMatch[1] : code;
-  var cover = coverMatch ? coverMatch[1] : null;
 
-  // Fetch playlist via browser request API (has CF cookies)
-  var ar = pg.request;
+  // Fetch playlist
   var pResp = await ar.get("https://surrit.com/" + uuid + "/playlist.m3u8", {
     headers: { Referer: "https://missav.ai/" }
   });
   if (!pResp.ok()) {
-    console.error("[Scrape] Playlist fetch failed:", pResp.status());
+    console.log("[Scrape] Playlist fetch:", pResp.status());
     return null;
   }
   var pt = await pResp.text();
@@ -138,27 +143,19 @@ async function scrapeJav(code) {
       cur = null;
     }
   });
-  if (!streams.length) {
-    console.error("[Scrape] No streams found for", code);
-    return null;
-  }
+  if (!streams.length) return null;
   streams.sort(function(a,b){ return b.bw - a.bw; });
   var best = streams[0];
   var vm3u8 = "https://surrit.com/" + uuid + "/" + best.url;
   var tsBase = vm3u8.substring(0, vm3u8.lastIndexOf("/"));
 
   return {
-    code: code,
-    title: title,
-    cover: cover,
-    uuid: uuid,
-    resolution: best.res,
-    vm3u8: vm3u8,
-    tsBase: tsBase
+    code: code, title: titleMatch ? titleMatch[1] : code,
+    cover: coverMatch ? coverMatch[1] : null,
+    uuid: uuid, resolution: best.res,
+    vm3u8: vm3u8, tsBase: tsBase
   };
-}
-
-// ====== Stream Proxy ======
+}// ====== Stream Proxy ======
 async function streamVideo(code, res) {
   var info = await scrapeJav(code);
   if (!info) {
