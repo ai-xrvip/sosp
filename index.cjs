@@ -91,8 +91,8 @@ async function scrapeJav(code) {
   var uuid = hex.reverse().join("-");
   if (!uuid || uuid.length < 20) return null;
 
-  var ti = html.match(/og:title["'\\s]+content=["']([^"']+)/);
-  var ci = html.match(/og:image["'\\s]+content=["']([^"']+)/);
+  var ti = html.match(/og:title["'\s]+content=["']([^"']+)/);
+  var ci = html.match(/og:image["'\s]+content=["']([^"']+)/);
   var title = ti ? ti[1].replace(/&amp;/g, "&") : code;
 
   // Get playlist
@@ -115,10 +115,10 @@ async function scrapeJav(code) {
 
   var streams = [];
   var cur = null;
-  pt.split("\\n").forEach(function(l) {
+  pt.split("\n").forEach(function(l) {
     if (l.startsWith("#EXT-X-STREAM-INF:")) {
-      var bw = parseInt((l.match(/BANDWIDTH=(\\d+)/) || [,"0"])[1]);
-      var res = (l.match(/RESOLUTION=(\\d+x\\d+)/) || [,"0x0"])[1];
+      var bw = parseInt((l.match(/BANDWIDTH=(\d+)/) || [,"0"])[1]);
+      var res = (l.match(/RESOLUTION=(\d+x\d+)/) || [,"0x0"])[1];
       cur = { bw: bw, res: res };
     } else if (cur && l.trim() && !l.startsWith("#")) {
       cur.url = l.trim();
@@ -144,8 +144,8 @@ async function streamVideo(code, res) {
   try { var r = await fetch(info.vm3u8, { headers: headers }); if (r.ok) vt = await r.text(); } catch(e) {}
   if (!vt) { res.status(502).json({ error: "Cannot fetch manifest" }); return; }
 
-  var segUrls = vt.split("\\n").filter(function(l){ return l.trim() && !l.startsWith("#"); }).map(function(l){ return l.trim().startsWith("http") ? l.trim() : info.tsBase + "/" + l.trim(); });
-  res.writeHead(200, { "Content-Type": "video/mp4", "Accept-Ranges": "bytes", "Content-Disposition": "inline; filename=\\"" + info.code + ".mp4\\"" });
+  var segUrls = vt.split("\n").filter(function(l){ return l.trim() && !l.startsWith("#"); }).map(function(l){ return l.trim().startsWith("http") ? l.trim() : info.tsBase + "/" + l.trim(); });
+  res.writeHead(200, { "Content-Type": "video/mp4", "Accept-Ranges": "bytes", "Content-Disposition": "inline; filename=\"" + info.code + ".mp4\"" });
 
   for (var i = 0; i < segUrls.length; i++) {
     try { var r = await fetch(segUrls[i], { headers: headers }); if (r.ok) res.write(Buffer.from(await r.arrayBuffer())); } catch(e) {}
@@ -170,12 +170,12 @@ setTimeout(function() {
   });
 }, 3000);
 
-bot.onText(/\\/start/, function(msg) { bot.sendMessage(msg.chat.id, "🎲 JAV Bot\nSend JAV code, e.g.: SSIS-123"); });
+bot.onText(/\/start/, function(msg) { bot.sendMessage(msg.chat.id, "🎲 JAV Bot\nSend JAV code, e.g.: SSIS-123"); });
 bot.on("message", async function(msg) {
   if (!msg.text || msg.text.startsWith("/")) return;
   if (!browserReady) { bot.sendMessage(msg.chat.id, "⏳ Starting..."); return; }
   var code = msg.text.trim().toUpperCase();
-  if (!/[A-Z]+-\\d+/.test(code)) return;
+  if (!/[A-Z]+-\d+/.test(code)) return;
   var cid = msg.chat.id;
   var sm = await bot.sendMessage(cid, "🔍 " + code + "...");
   try {
@@ -186,9 +186,9 @@ bot.on("message", async function(msg) {
     await bot.deleteMessage(cid, sm.message_id);
     try { await bot.sendVideo(cid, url, { caption: cap, supports_streaming: true }); }
     catch(e) {
-      var kb = { reply_markup: { inline_keyboard: [[{ text: "\\u25b6 Play", url: url }]] } };
-      if (info.cover) await bot.sendPhoto(cid, info.cover, Object.assign({ caption: cap + "\\n\\n" + url }, kb));
-      else await bot.sendMessage(cid, cap + "\\n\\n" + url, kb);
+      var kb = { reply_markup: { inline_keyboard: [[{ text: "▶ Play", url: url }]] } };
+      if (info.cover) await bot.sendPhoto(cid, info.cover, Object.assign({ caption: cap + "\n\n" + url }, kb));
+      else await bot.sendMessage(cid, cap + "\n\n" + url, kb);
     }
   } catch(e) { bot.editMessageText("Error: " + e.message.substring(0, 100), { chat_id: cid, message_id: sm.message_id }); }
 });
