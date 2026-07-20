@@ -29,7 +29,7 @@ async function fetchProxies(url) {
     const resp = await fetch(url, { signal: timeoutSignal(10000) });
     if (!resp.ok) return [];
     const text = await resp.text();
-    return text.split("\\n").map(l => l.trim()).filter(l => l && /^\\d+\\.\\d+\\.\\d+\\.\\d+:\\d+$/.test(l));
+    return text.split("\n").map(l => l.trim()).filter(l => l && /^\d+\.\d+\.\d+\.\d+:\d+$/.test(l));
   } catch(e) { return []; }
 }
 
