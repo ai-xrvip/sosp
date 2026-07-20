@@ -1,11 +1,10 @@
-﻿const { chromium } = require("playwright");
+const { chromium } = require("playwright");
 const express = require("express");
 const TelegramBot = require("node-telegram-bot-api");
 
 // ====== Config ======
 const BOT_TOKEN = "8889310845:AAFtgz9vTlb8vrPG7m0aPnT0mjXLwCQx-fs";
 const PORT = process.env.PORT || 3456;
-// Railway provides RAILWAY_PUBLIC_DOMAIN; fallback for local dev
 var PROXY_HOST = process.env.RAILWAY_PUBLIC_DOMAIN
   ? "https://" + process.env.RAILWAY_PUBLIC_DOMAIN
   : "http://localhost:" + PORT;
@@ -14,21 +13,37 @@ var PROXY_HOST = process.env.RAILWAY_PUBLIC_DOMAIN
 var browser, ctx, pg;
 var browserReady = false;
 var lastActivity = Date.now();
-var SESSION_REFRESH_MS = 10 * 60 * 1000; // 10 min
+var SESSION_REFRESH_MS = 8 * 60 * 1000;
 
 async function initBrowser() {
   try {
     browser = await chromium.launch({
       headless: true,
-      args: ["--no-sandbox", "--disable-setuid-sandbox"]
+      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
     });
     ctx = await browser.newContext({
       userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      viewport: { width: 1920, height: 1080 }
+      viewport: { width: 1920, height: 1080 },
+      locale: "ja-JP"
     });
     pg = await ctx.newPage();
+
+    console.log("[Browser] Warming up on missav.ai...");
     await pg.goto("https://missav.ai", { waitUntil: "domcontentloaded", timeout: 30000 });
-    await pg.waitForTimeout(2000);
+    await pg.waitForTimeout(5000);
+    var title = await pg.title();
+    console.log("[Browser] Warmup page title:", title);
+
+    if (title.includes("Just a moment") || title.includes("cloudflare") || title.includes("Attention")) {
+      console.log("[Browser] CF detected, trying surrit.com...");
+      await pg.goto("https://surrit.com", { waitUntil: "domcontentloaded", timeout: 15000 });
+      await pg.waitForTimeout(3000);
+      await pg.goto("https://missav.ai", { waitUntil: "domcontentloaded", timeout: 15000 });
+      await pg.waitForTimeout(3000);
+      title = await pg.title();
+      console.log("[Browser] Retry page title:", title);
+    }
+
     browserReady = true;
     lastActivity = Date.now();
     console.log("[OK] Browser initialized and warmed up");
@@ -38,7 +53,6 @@ async function initBrowser() {
   }
 }
 
-// Refresh browser session periodically to avoid CF ban
 async function ensureSession() {
   if (!browserReady) return;
   var now = Date.now();
@@ -46,7 +60,7 @@ async function ensureSession() {
     console.log("[Session] Refreshing...");
     try {
       await pg.goto("https://missav.ai", { waitUntil: "domcontentloaded", timeout: 15000 });
-      await pg.waitForTimeout(2000);
+      await pg.waitForTimeout(3000);
       console.log("[Session] Refreshed");
     } catch(e) {
       console.error("[Session] Refresh failed, re-creating browser");
@@ -58,52 +72,58 @@ async function ensureSession() {
 }
 
 async function closeBrowser() {
-  try {
-    if (browser) await browser.close();
-  } catch(e) {}
+  try { if (browser) await browser.close(); } catch(e) {}
   browser = null; ctx = null; pg = null;
   browserReady = false;
 }
 
-// ====== Scraper ======
+async function grabCookiesForDomain(domain) {
+  var cookies = await ctx.cookies();
+  return cookies.filter(function(c){ return domain ? c.domain.includes(domain) : true; });
+}
+
+function cookiesToHeader(cookies) {
+  return cookies.map(function(c){ return c.name + "=" + c.value; }).join("; ");
+}
+
 async function scrapeJav(code) {
   code = code.toUpperCase();
   await ensureSession();
 
-  var ar = pg.request;
   var html = null;
 
-  // Try fetching via API request first (fast, no page navigation)
-  try {
-    var url = "https://missav.ai/" + code.toLowerCase();
-    var resp = await ar.get(url, { headers: { Referer: "https://missav.ai/" } });
-    if (resp.ok()) {
-      html = await resp.text();
-    }
-  } catch(e) {
-    console.log("[Scrape] API fetch failed:", e.message);
-  }
-
-  // Fallback: navigate with page (handles JS challenge)
-  if (!html || html.indexOf("m3u8|") === -1) {
-    console.log("[Scrape] API fetch no m3u8, trying page navigation");
+  for (var attempt = 0; attempt < 2; attempt++) {
     try {
-      await pg.goto("https://missav.ai/" + code.toLowerCase(), { waitUntil: "domcontentloaded", timeout: 45000 });
+      await pg.goto("https://missav.ai/" + code.toLowerCase(), {
+        waitUntil: "domcontentloaded",
+        timeout: 30000
+      });
       await pg.waitForTimeout(3000);
       html = await pg.content();
-    } catch(e2) {
-      console.log("[Scrape] Navigation also failed:", e2.message);
-      return null;
+
+      if (html.indexOf("m3u8|") !== -1) break;
+
+      var pTitle = await pg.title();
+      console.log("[Scrape] Attempt", attempt+1, "- Title:", pTitle);
+
+      if (attempt === 0) {
+        console.log("[Scrape] Retrying with longer wait...");
+        await pg.waitForTimeout(5000);
+        html = await pg.content();
+        if (html.indexOf("m3u8|") !== -1) break;
+      }
+    } catch(e) {
+      console.log("[Scrape] Navigation attempt", attempt+1, "failed:", e.message);
     }
   }
 
-  // Extract UUID
-  var idx = html.indexOf("m3u8|");
-  if (idx === -1) {
-    console.log("[Scrape] No m3u8| pattern for", code);
+  if (!html || html.indexOf("m3u8|") === -1) {
+    console.log("[Scrape] No m3u8| pattern found for", code);
     return null;
   }
-  var section = html.substring(idx, idx + 200);
+
+  var idx = html.indexOf("m3u8|");
+  var section = html.substring(idx, idx + 300);
   var parts = section.split("|");
   var hexParts = [];
   for (var i = 1; i < parts.length; i++) {
@@ -116,20 +136,45 @@ async function scrapeJav(code) {
     return null;
   }
 
-  var titleMatch = html.match(/og:title"\s+content="([^"]+)"/);
-  var coverMatch = html.match(/og:image"\s+content="([^"]+)"/);
+  var titleMatch = html.match(/og:title["'\s]+content=["']([^"']+)/);
+  var coverMatch = html.match(/og:image["'\s]+content=["']([^"']+)/);
+  var title = titleMatch ? titleMatch[1].replace(/&amp;/g, "&") : code;
 
-  // Fetch playlist
-  var pResp = await ar.get("https://surrit.com/" + uuid + "/playlist.m3u8", {
-    headers: { Referer: "https://missav.ai/" }
-  });
-  if (!pResp.ok()) {
-    console.log("[Scrape] Playlist fetch:", pResp.status());
+  var cfCookies = await grabCookiesForDomain("surrit.com");
+  var cookieHeader = cookiesToHeader(cfCookies);
+  console.log("[Scrape] surrit.com cookies:", cfCookies.length);
+
+  var pt = null;
+  try {
+    await pg.goto("https://surrit.com/" + uuid + "/playlist.m3u8", {
+      waitUntil: "domcontentloaded",
+      timeout: 20000
+    });
+    await pg.waitForTimeout(1000);
+    var bodyText = await pg.evaluate(function(){ return document.body ? document.body.innerText : ""; });
+    if (bodyText && bodyText.includes("#EXTM3U")) pt = bodyText;
+  } catch(e) {
+    console.log("[Scrape] Playlist nav failed:", e.message);
+  }
+
+  if (!pt || !pt.includes("#EXTM3U")) {
+    console.log("[Scrape] Trying API playlist fetch...");
+    try {
+      var ar = pg.request;
+      var pResp = await ar.get("https://surrit.com/" + uuid + "/playlist.m3u8", {
+        headers: { Referer: "https://missav.ai/" }
+      });
+      if (pResp.ok()) pt = await pResp.text();
+    } catch(e) {
+      console.log("[Scrape] API playlist fetch failed:", e.message);
+    }
+  }
+
+  if (!pt || !pt.includes("#EXTM3U")) {
+    console.log("[Scrape] No valid playlist");
     return null;
   }
-  var pt = await pResp.text();
 
-  // Parse streams
   var streams = [];
   var cur = null;
   pt.split("\n").forEach(function(l) {
@@ -150,12 +195,14 @@ async function scrapeJav(code) {
   var tsBase = vm3u8.substring(0, vm3u8.lastIndexOf("/"));
 
   return {
-    code: code, title: titleMatch ? titleMatch[1] : code,
+    code: code, title: title,
     cover: coverMatch ? coverMatch[1] : null,
     uuid: uuid, resolution: best.res,
-    vm3u8: vm3u8, tsBase: tsBase
+    vm3u8: vm3u8, tsBase: tsBase,
+    cookieHeader: cookieHeader
   };
-}// ====== Stream Proxy ======
+}
+
 async function streamVideo(code, res) {
   var info = await scrapeJav(code);
   if (!info) {
@@ -164,15 +211,34 @@ async function streamVideo(code, res) {
   }
   console.log("[Stream]", info.code, info.resolution);
 
-  var ar = pg.request;
-  var vResp = await ar.get(info.vm3u8, {
-    headers: { Referer: "https://missav.ai/" }
-  });
-  if (!vResp.ok()) {
+  var headers = {
+    "Referer": "https://missav.ai/",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+  };
+  if (info.cookieHeader) headers["Cookie"] = info.cookieHeader;
+
+  var vt = null;
+  try {
+    var vResp = await fetch(info.vm3u8, { headers: headers });
+    if (vResp.ok) vt = await vResp.text();
+  } catch(e) {
+    console.log("[Stream] fetch failed:", e.message);
+  }
+
+  if (!vt) {
+    try {
+      var ar = pg.request;
+      var pr = await ar.get(info.vm3u8, { headers: headers });
+      if (pr.ok()) vt = await pr.text();
+    } catch(e) {
+      console.log("[Stream] pg.request failed:", e.message);
+    }
+  }
+
+  if (!vt) {
     res.status(502).json({ error: "Cannot fetch manifest" });
     return;
   }
-  var vt = await vResp.text();
 
   var segUrls = vt.split("\n")
     .filter(function(l){ return l.trim() && !l.startsWith("#"); })
@@ -184,15 +250,26 @@ async function streamVideo(code, res) {
     "Content-Disposition": "inline; filename=\"" + info.code + ".mp4\""
   });
 
+  var ar2 = pg.request;
   for (var i = 0; i < segUrls.length; i++) {
     try {
-      var sResp = await ar.get(segUrls[i], {
-        headers: { Referer: "https://missav.ai/" }
-      });
-      if (sResp.ok()) {
-        res.write(await sResp.body());
+      var buf = null;
+      try {
+        var resp = await fetch(segUrls[i], { headers: headers });
+        if (resp.ok) buf = Buffer.from(await resp.arrayBuffer());
+      } catch(e) {}
+
+      if (!buf) {
+        try {
+          var pr2 = await ar2.get(segUrls[i], { headers: headers });
+          if (pr2.ok()) buf = await pr2.body();
+        } catch(e) {}
+      }
+
+      if (buf) {
+        res.write(buf);
       } else {
-        console.log("[Stream] Segment failed:", i, sResp.status());
+        console.log("[Stream] Segment failed:", i);
       }
     } catch(e) {
       console.log("[Stream] Segment error:", i, e.message);
@@ -202,7 +279,6 @@ async function streamVideo(code, res) {
   console.log("[Stream] Done", info.code);
 }
 
-// ====== Express Server ======
 var app = express();
 
 app.get("/health", function(req, res) {
@@ -218,15 +294,12 @@ app.get("/proxy", function(req, res) {
   });
 });
 
-// ====== Telegram Bot ======
-// Start with a delay to avoid 409 conflict from previous instance
 var bot = new TelegramBot(BOT_TOKEN, { polling: false });
 setTimeout(function() {
   bot.startPolling().then(function() {
     console.log("[Bot] Polling started");
   }).catch(function(e) {
     console.error("[Bot] Polling start failed:", e.message);
-    // Retry after 10 seconds
     setTimeout(function() {
       bot.startPolling().then(function() {
         console.log("[Bot] Polling started (retry)");
@@ -239,34 +312,34 @@ setTimeout(function() {
 console.log("[Bot] Will start polling in 3 seconds");
 
 bot.onText(/\/start/, function(msg) {
-  bot.sendMessage(msg.chat.id, "馃幀 JAV Bot\nSend JAV code to search, e.g.: SSIS-123");
+  bot.sendMessage(msg.chat.id, "🎲 JAV Bot\nSend JAV code to search, e.g.: SSIS-123");
 });
 
 bot.on("message", async function(msg) {
   if (!msg.text || msg.text.startsWith("/")) return;
   if (!browserReady) {
-    bot.sendMessage(msg.chat.id, "鈴?Bot is starting up, please wait...");
+    bot.sendMessage(msg.chat.id, "⏳ Bot is starting up, please wait...");
     return;
   }
   var code = msg.text.trim().toUpperCase();
   if (!/[A-Z]+-\d+/.test(code)) return;
 
   var cid = msg.chat.id;
-  var sm = await bot.sendMessage(cid, "馃攳 Searching " + code + "...");
+  var sm = await bot.sendMessage(cid, "🔍 Searching " + code + "...");
   try {
     var info = await scrapeJav(code);
     if (!info) {
-      bot.editMessageText("鉂?Not found: " + code, { chat_id: cid, message_id: sm.message_id });
+      bot.editMessageText("⚠️ Not found: " + code, { chat_id: cid, message_id: sm.message_id });
       return;
     }
     var url = PROXY_HOST + "/proxy?code=" + code;
-    var cap = "馃幀 " + info.title + "\n馃搶 " + code + "\n馃帴 " + info.resolution;
+    var cap = "🎲 " + info.title + "\n📋 " + code + "\n🎴 " + info.resolution;
     await bot.deleteMessage(cid, sm.message_id);
     try {
       await bot.sendVideo(cid, url, { caption: cap, supports_streaming: true });
     } catch(e) {
       console.log("[Bot] SendVideo fail:", e.message);
-      var kb = { reply_markup: { inline_keyboard: [[{ text: "鈻讹笍 Play", url: url }]] } };
+      var kb = { reply_markup: { inline_keyboard: [[{ text: "▶️ Play", url: url }]] } };
       if (info.cover) {
         await bot.sendPhoto(cid, info.cover, Object.assign({ caption: cap + "\n\n" + url }, kb));
       } else {
@@ -275,11 +348,10 @@ bot.on("message", async function(msg) {
     }
   } catch(e) {
     console.error("[Bot] Error:", e.message);
-    bot.editMessageText("鉂?" + e.message.substring(0, 100), { chat_id: cid, message_id: sm.message_id });
+    bot.editMessageText("⚠️ " + e.message.substring(0, 100), { chat_id: cid, message_id: sm.message_id });
   }
 });
 
-// ====== Start ======
 async function main() {
   await initBrowser();
   app.listen(PORT, function() {
