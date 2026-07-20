@@ -2,6 +2,34 @@
 const express = require('express');
 const TelegramBot = require('node-telegram-bot-api');
 const proxyPool = require('./proxyPool.cjs');
+const { execFileSync } = require('child_process');
+const PYTHON = process.platform === 'win32'
+  ? 'C:\\Users\\13249\\AppData\\Local\\Programs\\Python\\Python312\\python.exe'
+  : 'python3';
+const SCRAPER_PATH = __dirname + '/missav_scraper.py';
+
+function scrapeWithPython(code) {
+  try {
+    const stdout = execFileSync(PYTHON, [SCRAPER_PATH, code], {
+      timeout: 30000,
+      encoding: 'utf8',
+      env: Object.assign({}, process.env)
+    });
+    const data = JSON.parse(stdout);
+    if (data.error) {
+      console.log('[Py]', code, 'Error:', data.error);
+      return null;
+    }
+    if (data.m3u8_url) {
+      console.log('[Py]', code, '->', data.method, data.mirror, data.m3u8_url.substring(0, 50));
+      return data;
+    }
+    return null;
+  } catch(e) {
+    console.log('[Py] Exception:', e.message.substring(0, 80));
+    return null;
+  }
+}
 
 const BOT_TOKEN = '8889310845:AAFtgz9vTlb8vrPG7m0aPnT0mjXLwCQx-fs';
 const PORT = process.env.PORT || 3456;
@@ -86,6 +114,21 @@ async function initBrowser(proxyAddr) {
 
 // Scrape JAV info: try page.evaluate(fetch) first, then page.goto fallback
 async function scrapeJav(code) {
+  code = code.toUpperCase();
+  const pyResult = scrapeWithPython(code);
+  if (pyResult && pyResult.m3u8_url) {
+    return {
+      code: pyResult.code || code,
+      title: pyResult.title || code,
+      cover: pyResult.cover || null,
+      m3u8_url: pyResult.m3u8_url,
+      resolution: pyResult.resolution || 'unknown',
+      uuid: pyResult.uuid || '',
+      _source: 'python'
+    };
+  }
+  console.log('[Scrape] Python failed, trying Playwright...');
+  code = code.toUpperCase();
   code = code.toUpperCase();
   const videoPath = code.toLowerCase();
 
@@ -193,23 +236,72 @@ async function streamVideo(code, res) {
   let info = await scrapeJav(code);
   if (!info) { res.status(404).json({ error: 'Not found', code }); return; }
 
-  const streamInfo = await getBestStream(info.uuid);
-  if (!streamInfo) { res.status(502).json({ error: 'Cannot get stream' }); return; }
-
   const headers = { 'Referer': 'https://missav.ai/', 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' };
+  let vm3u8 = info.m3u8_url || '';
+  if (!vm3u8 && info.uuid) vm3u8 = 'https://surrit.com/' + info.uuid + '/playlist.m3u8';
+  if (!vm3u8) { res.status(404).json({ error: 'No stream URL' }); return; }
+
+  // Fetch the variant m3u8 playlist
   let vt = null;
   try {
-    const r = await fetch(streamInfo.vm3u8, { headers, signal: AbortSignal.timeout(10000) });
+    const r = await fetch(vm3u8, { headers, signal: AbortSignal.timeout(10000) });
     if (r.ok) vt = await r.text();
   } catch(e) {}
-  if (!vt) { res.status(502).json({ error: 'Cannot fetch manifest' }); return; }
 
-  const segUrls = vt.split('\n').filter(l => l.trim() && !l.startsWith('#')).map(l => l.trim().startsWith('http') ? l.trim() : streamInfo.tsBase + '/' + l.trim());
-  res.writeHead(200, { 'Content-Type': 'video/mp4', 'Accept-Ranges': 'bytes', 'Content-Disposition': 'inline; filename="' + info.code + '.mp4"' });
+  if (!vt || vt.indexOf('#EXTM3U') === -1) {
+    res.status(502).json({ error: 'Cannot fetch playlist', url: vm3u8 });
+    return;
+  }
+
+  // Find best quality variant if this is a multi-resolution playlist
+  if (vt.indexOf('EXT-X-STREAM-INF') !== -1) {
+    const base = vm3u8.substring(0, vm3u8.lastIndexOf('/'));
+    const streams = [];
+    let cur = null;
+    vt.split('\n').forEach(l => {
+      if (l.startsWith('#EXT-X-STREAM-INF:')) {
+        cur = {
+          bw: parseInt((l.match(/BANDWIDTH=(\d+)/) || [,'0'])[1]),
+          res: (l.match(/RESOLUTION=(\d+x\d+)/) || [,'0x0'])[1]
+        };
+      } else if (cur && l.trim() && !l.startsWith('#')) {
+        cur.url = l.trim();
+        streams.push(cur);
+        cur = null;
+      }
+    });
+    streams.sort((a,b) => b.bw - a.bw);
+    if (streams.length) {
+      const best = streams[0];
+      vm3u8 = base + '/' + best.url;
+      info.resolution = best.res;
+      // Fetch the actual segment playlist
+      try {
+        const r = await fetch(vm3u8, { headers, signal: AbortSignal.timeout(10000) });
+        if (r.ok) vt = await r.text();
+      } catch(e) {}
+    }
+  }
+
+  // Extract TS segment URLs and stream them
+  const segUrls = vt.split('\n').filter(l => l.trim() && !l.startsWith('#')).map(l =>
+    l.trim().startsWith('http') ? l.trim() : (vm3u8.substring(0, vm3u8.lastIndexOf('/'))) + '/' + l.trim()
+  );
+
+  if (segUrls.length === 0) {
+    res.status(502).json({ error: 'No segments in playlist' });
+    return;
+  }
+
+  res.writeHead(200, {
+    'Content-Type': 'video/mp4',
+    'Accept-Ranges': 'bytes',
+    'Content-Disposition': 'inline; filename="' + info.code + '.mp4"'
+  });
 
   for (let i = 0; i < segUrls.length; i++) {
     try {
-      const r = await fetch(segUrls[i], { headers, signal: AbortSignal.timeout(10000) });
+      const r = await fetch(segUrls[i], { headers, signal: AbortSignal.timeout(15000) });
       if (r.ok) res.write(Buffer.from(await r.arrayBuffer()));
     } catch(e) {}
   }
