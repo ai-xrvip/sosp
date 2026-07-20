@@ -1,4 +1,4 @@
 node_modules/
 .DS_Store
 test_*.mp4
-*.py
+# *.py (removed - need missav_scraper.py)
