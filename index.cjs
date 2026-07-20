@@ -212,8 +212,13 @@ bot.on("message", async function(msg) {
   } catch(e) { bot.editMessageText("Error: " + e.message.substring(0, 100), { chat_id: cid, message_id: sm.message_id }); }
 });
 
-async function main() {
-  await initBrowser();
-  app.listen(PORT, function() { console.log("[Server] on port " + PORT); });
-}
-main().catch(function(e) { console.error("[FATAL]", e); process.exit(1); });
+// Start server immediately
+app.listen(PORT, function() {
+  console.log("[Server] on port " + PORT);
+  // Init browser in background
+  initBrowser().then(function() {
+    console.log("[Bot] Browser ready, starting polling...");
+  }).catch(function(e) {
+    console.error("[FATAL] Browser init:", e.message);
+  });
+});
