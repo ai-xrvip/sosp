@@ -1,4 +1,4 @@
-const { chromium } = require("playwright");
+﻿const { chromium } = require("playwright");
 const express = require("express");
 const TelegramBot = require("node-telegram-bot-api");
 
@@ -71,13 +71,13 @@ async function scrapeJav(code) {
   await ensureSession();
 
   try {
-    await pg.goto("https://missav.ai/" + code.toLowerCase(), { waitUntil: "networkidle", timeout: 30000 });
+    await pg.goto("https://missav.ai/" + code.toLowerCase(), { waitUntil: "domcontentloaded", timeout: 30000 });
   } catch(e) {
     console.error("[Scrape] goto failed:", e.message);
     // Try once more with a new page
     try {
       pg = await ctx.newPage();
-      await pg.goto("https://missav.ai/" + code.toLowerCase(), { waitUntil: "networkidle", timeout: 30000 });
+      await pg.goto("https://missav.ai/" + code.toLowerCase(), { waitUntil: "domcontentloaded", timeout: 30000 });
     } catch(e2) {
       throw new Error("Cannot load page: " + e2.message);
     }
@@ -242,34 +242,34 @@ setTimeout(function() {
 console.log("[Bot] Will start polling in 3 seconds");
 
 bot.onText(/\/start/, function(msg) {
-  bot.sendMessage(msg.chat.id, "🎬 JAV Bot\nSend JAV code to search, e.g.: SSIS-123");
+  bot.sendMessage(msg.chat.id, "馃幀 JAV Bot\nSend JAV code to search, e.g.: SSIS-123");
 });
 
 bot.on("message", async function(msg) {
   if (!msg.text || msg.text.startsWith("/")) return;
   if (!browserReady) {
-    bot.sendMessage(msg.chat.id, "⏳ Bot is starting up, please wait...");
+    bot.sendMessage(msg.chat.id, "鈴?Bot is starting up, please wait...");
     return;
   }
   var code = msg.text.trim().toUpperCase();
   if (!/[A-Z]+-\d+/.test(code)) return;
 
   var cid = msg.chat.id;
-  var sm = await bot.sendMessage(cid, "🔍 Searching " + code + "...");
+  var sm = await bot.sendMessage(cid, "馃攳 Searching " + code + "...");
   try {
     var info = await scrapeJav(code);
     if (!info) {
-      bot.editMessageText("❌ Not found: " + code, { chat_id: cid, message_id: sm.message_id });
+      bot.editMessageText("鉂?Not found: " + code, { chat_id: cid, message_id: sm.message_id });
       return;
     }
     var url = PROXY_HOST + "/proxy?code=" + code;
-    var cap = "🎬 " + info.title + "\n📌 " + code + "\n🎥 " + info.resolution;
+    var cap = "馃幀 " + info.title + "\n馃搶 " + code + "\n馃帴 " + info.resolution;
     await bot.deleteMessage(cid, sm.message_id);
     try {
       await bot.sendVideo(cid, url, { caption: cap, supports_streaming: true });
     } catch(e) {
       console.log("[Bot] SendVideo fail:", e.message);
-      var kb = { reply_markup: { inline_keyboard: [[{ text: "▶️ Play", url: url }]] } };
+      var kb = { reply_markup: { inline_keyboard: [[{ text: "鈻讹笍 Play", url: url }]] } };
       if (info.cover) {
         await bot.sendPhoto(cid, info.cover, Object.assign({ caption: cap + "\n\n" + url }, kb));
       } else {
@@ -278,7 +278,7 @@ bot.on("message", async function(msg) {
     }
   } catch(e) {
     console.error("[Bot] Error:", e.message);
-    bot.editMessageText("❌ " + e.message.substring(0, 100), { chat_id: cid, message_id: sm.message_id });
+    bot.editMessageText("鉂?" + e.message.substring(0, 100), { chat_id: cid, message_id: sm.message_id });
   }
 });
 
