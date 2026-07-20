@@ -222,8 +222,24 @@ app.get("/proxy", function(req, res) {
 });
 
 // ====== Telegram Bot ======
-var bot = new TelegramBot(BOT_TOKEN, { polling: true });
-console.log("[Bot] Started polling");
+// Start with a delay to avoid 409 conflict from previous instance
+var bot = new TelegramBot(BOT_TOKEN, { polling: false });
+setTimeout(function() {
+  bot.startPolling().then(function() {
+    console.log("[Bot] Polling started");
+  }).catch(function(e) {
+    console.error("[Bot] Polling start failed:", e.message);
+    // Retry after 10 seconds
+    setTimeout(function() {
+      bot.startPolling().then(function() {
+        console.log("[Bot] Polling started (retry)");
+      }).catch(function(e2) {
+        console.error("[Bot] Polling retry failed:", e2.message);
+      });
+    }, 10000);
+  });
+}, 3000);
+console.log("[Bot] Will start polling in 3 seconds");
 
 bot.onText(/\/start/, function(msg) {
   bot.sendMessage(msg.chat.id, "🎬 JAV Bot\nSend JAV code to search, e.g.: SSIS-123");
