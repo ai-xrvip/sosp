@@ -29,7 +29,7 @@ async function pageHasContent(page) {
 }
 
 async function loadWithCfRetry(url) {
-  for (var i = 0; i < 10; i++) {
+  for (var i = 0; i < 15; i++) {
     try {
       await pg.goto(url, { waitUntil: "domcontentloaded", timeout: 20000 });
     } catch(e) {}
@@ -47,7 +47,7 @@ async function loadWithCfRetry(url) {
     console.log("[Nav] CF:", s.title, "retry", i+1);
     await pg.waitForTimeout(2000);
   }
-  console.log("[Nav] Failed after 10 retries");
+  console.log("[Nav] Failed after 15 retries");
   return false;
 }
 
@@ -55,14 +55,24 @@ async function initBrowser() {
   try {
     browser = await chromium.launch({
       headless: true,
-      args: ["--no-sandbox", "--disable-setuid-sandbox"]
+      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-blink-features=AutomationControlled", "--window-size=1920,1080"]
     });
     ctx = await browser.newContext({
       userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
       viewport: { width: 1920, height: 1080 }
     });
     pg = await ctx.newPage();
+    await pg.addInitScript(function() {
+      Object.defineProperty(navigator, 'webdriver', { get: function() { return undefined; } });
+      Object.defineProperty(navigator, 'plugins', { get: function() { return [1,2,3,4,5]; } });
+      Object.defineProperty(navigator, 'languages', { get: function() { return ['en-US', 'en']; } });
+    });
     console.log("[Browser] Warming up...");
+    // Try surrit.com first to warm up cookies, then missav
+    try {
+      await pg.goto("https://surrit.com", { waitUntil: "domcontentloaded", timeout: 10000 });
+      await pg.waitForTimeout(2000);
+    } catch(e) {}
     var ok = await loadWithCfRetry("https://missav.ai");
     browserReady = true;
     console.log("[OK] Browser ready. CF bypass:", ok);
