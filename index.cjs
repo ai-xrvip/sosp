@@ -12,8 +12,38 @@ var PROXY_HOST = process.env.RAILWAY_PUBLIC_DOMAIN
 // ====== Browser Management ======
 var browser, ctx, pg;
 var browserReady = false;
-var lastActivity = Date.now();
-var SESSION_REFRESH_MS = 8 * 60 * 1000;
+
+async function isCfBlocked(page) {
+  var ct = (await page.content()).toLowerCase();
+  return ct.indexOf("just a moment") !== -1
+    || ct.indexOf("cloudflare") !== -1
+    || ct.indexOf("attention required") !== -1
+    || ct.indexOf("please wait") !== -1
+    || ct.indexOf("challenge-form") !== -1
+    || ct.indexOf("cf-browser-verification") !== -1
+    || ct.indexOf("しばらくお待ちください") !== -1;
+}
+
+async function navigateWithCfRetry(url, maxWaitMs) {
+  var start = Date.now();
+  while (Date.now() - start < maxWaitMs) {
+    try {
+      await pg.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
+      await pg.waitForTimeout(2000);
+      if (!(await isCfBlocked(pg))) {
+        var t = await pg.title();
+        console.log("[Nav] OK - Title:", t);
+        return true;
+      }
+      console.log("[Nav] CF block, waiting...");
+      await pg.waitForTimeout(3000);
+    } catch(e) {
+      console.log("[Nav] Error:", e.message);
+      await pg.waitForTimeout(2000);
+    }
+  }
+  return false;
+}
 
 async function initBrowser() {
   try {
@@ -29,99 +59,40 @@ async function initBrowser() {
     pg = await ctx.newPage();
 
     console.log("[Browser] Warming up on missav.ai...");
-    await pg.goto("https://missav.ai", { waitUntil: "domcontentloaded", timeout: 30000 });
-    await pg.waitForTimeout(5000);
-    var title = await pg.title();
-    console.log("[Browser] Warmup page title:", title);
-
-    if (title.includes("Just a moment") || title.includes("cloudflare") || title.includes("Attention")) {
-      console.log("[Browser] CF detected, trying surrit.com...");
-      await pg.goto("https://surrit.com", { waitUntil: "domcontentloaded", timeout: 15000 });
+    var ok = await navigateWithCfRetry("https://missav.ai", 60000);
+    if (!ok) {
+      // Try surrit.com first, then back to missav
+      console.log("[Browser] First try failed, trying surrit.com...");
+      await pg.goto("https://surrit.com", { waitUntil: "domcontentloaded", timeout: 15000 }).catch(function(){});
       await pg.waitForTimeout(3000);
-      await pg.goto("https://missav.ai", { waitUntil: "domcontentloaded", timeout: 15000 });
-      await pg.waitForTimeout(3000);
-      title = await pg.title();
-      console.log("[Browser] Retry page title:", title);
+      ok = await navigateWithCfRetry("https://missav.ai", 30000);
     }
 
     browserReady = true;
-    lastActivity = Date.now();
-    console.log("[OK] Browser initialized and warmed up");
+    console.log("[OK] Browser initialized and warmed up. CF bypass:", ok);
   } catch(e) {
     console.error("[FATAL] Browser init failed:", e.message);
     throw e;
   }
 }
 
-async function ensureSession() {
-  if (!browserReady) return;
-  var now = Date.now();
-  if (now - lastActivity > SESSION_REFRESH_MS) {
-    console.log("[Session] Refreshing...");
-    try {
-      await pg.goto("https://missav.ai", { waitUntil: "domcontentloaded", timeout: 15000 });
-      await pg.waitForTimeout(3000);
-      console.log("[Session] Refreshed");
-    } catch(e) {
-      console.error("[Session] Refresh failed, re-creating browser");
-      await closeBrowser();
-      await initBrowser();
-    }
-  }
-  lastActivity = now;
-}
-
-async function closeBrowser() {
-  try { if (browser) await browser.close(); } catch(e) {}
-  browser = null; ctx = null; pg = null;
-  browserReady = false;
-}
-
-async function grabCookiesForDomain(domain) {
-  var cookies = await ctx.cookies();
-  return cookies.filter(function(c){ return domain ? c.domain.includes(domain) : true; });
-}
-
-function cookiesToHeader(cookies) {
-  return cookies.map(function(c){ return c.name + "=" + c.value; }).join("; ");
-}
-
 async function scrapeJav(code) {
   code = code.toUpperCase();
-  await ensureSession();
 
-  var html = null;
-
-  for (var attempt = 0; attempt < 2; attempt++) {
-    try {
-      await pg.goto("https://missav.ai/" + code.toLowerCase(), {
-        waitUntil: "domcontentloaded",
-        timeout: 30000
-      });
-      await pg.waitForTimeout(3000);
-      html = await pg.content();
-
-      if (html.indexOf("m3u8|") !== -1) break;
-
-      var pTitle = await pg.title();
-      console.log("[Scrape] Attempt", attempt+1, "- Title:", pTitle);
-
-      if (attempt === 0) {
-        console.log("[Scrape] Retrying with longer wait...");
-        await pg.waitForTimeout(5000);
-        html = await pg.content();
-        if (html.indexOf("m3u8|") !== -1) break;
-      }
-    } catch(e) {
-      console.log("[Scrape] Navigation attempt", attempt+1, "failed:", e.message);
-    }
+  // Navigate to video page with CF retry
+  var ok = await navigateWithCfRetry("https://missav.ai/" + code.toLowerCase(), 60000);
+  if (!ok) {
+    console.log("[Scrape] Could not bypass CF for", code);
+    return null;
   }
 
-  if (!html || html.indexOf("m3u8|") === -1) {
+  var html = await pg.content();
+  if (html.indexOf("m3u8|") === -1) {
     console.log("[Scrape] No m3u8| pattern found for", code);
     return null;
   }
 
+  // Extract UUID
   var idx = html.indexOf("m3u8|");
   var section = html.substring(idx, idx + 300);
   var parts = section.split("|");
@@ -140,24 +111,22 @@ async function scrapeJav(code) {
   var coverMatch = html.match(/og:image["'\s]+content=["']([^"']+)/);
   var title = titleMatch ? titleMatch[1].replace(/&amp;/g, "&") : code;
 
-  var cfCookies = await grabCookiesForDomain("surrit.com");
-  var cookieHeader = cookiesToHeader(cfCookies);
-  console.log("[Scrape] surrit.com cookies:", cfCookies.length);
+  // Export cookies for TS segment fetching
+  var cookies = await ctx.cookies();
+  var surritCookies = cookies.filter(function(c){ return c.domain.indexOf("surrit") !== -1; });
+  var cookieHeader = surritCookies.map(function(c){ return c.name + "=" + c.value; }).join("; ");
+  console.log("[Scrape] surrit.com cookies:", surritCookies.length);
 
+  // Fetch playlist m3u8 - navigate to it
   var pt = null;
-  try {
-    await pg.goto("https://surrit.com/" + uuid + "/playlist.m3u8", {
-      waitUntil: "domcontentloaded",
-      timeout: 20000
-    });
-    await pg.waitForTimeout(1000);
+  ok = await navigateWithCfRetry("https://surrit.com/" + uuid + "/playlist.m3u8", 30000);
+  if (ok) {
     var bodyText = await pg.evaluate(function(){ return document.body ? document.body.innerText : ""; });
-    if (bodyText && bodyText.includes("#EXTM3U")) pt = bodyText;
-  } catch(e) {
-    console.log("[Scrape] Playlist nav failed:", e.message);
+    if (bodyText && bodyText.indexOf("#EXTM3U") !== -1) pt = bodyText;
   }
 
-  if (!pt || !pt.includes("#EXTM3U")) {
+  // Fallback: API fetch
+  if (!pt) {
     console.log("[Scrape] Trying API playlist fetch...");
     try {
       var ar = pg.request;
@@ -170,11 +139,12 @@ async function scrapeJav(code) {
     }
   }
 
-  if (!pt || !pt.includes("#EXTM3U")) {
+  if (!pt || pt.indexOf("#EXTM3U") === -1) {
     console.log("[Scrape] No valid playlist");
     return null;
   }
 
+  // Parse streams
   var streams = [];
   var cur = null;
   pt.split("\n").forEach(function(l) {
@@ -217,22 +187,19 @@ async function streamVideo(code, res) {
   };
   if (info.cookieHeader) headers["Cookie"] = info.cookieHeader;
 
+  // Fetch variant m3u8
   var vt = null;
   try {
     var vResp = await fetch(info.vm3u8, { headers: headers });
     if (vResp.ok) vt = await vResp.text();
-  } catch(e) {
-    console.log("[Stream] fetch failed:", e.message);
-  }
+  } catch(e) {}
 
   if (!vt) {
     try {
       var ar = pg.request;
       var pr = await ar.get(info.vm3u8, { headers: headers });
       if (pr.ok()) vt = await pr.text();
-    } catch(e) {
-      console.log("[Stream] pg.request failed:", e.message);
-    }
+    } catch(e) {}
   }
 
   if (!vt) {
@@ -252,33 +219,28 @@ async function streamVideo(code, res) {
 
   var ar2 = pg.request;
   for (var i = 0; i < segUrls.length; i++) {
+    var buf = null;
     try {
-      var buf = null;
+      var resp = await fetch(segUrls[i], { headers: headers });
+      if (resp.ok) buf = Buffer.from(await resp.arrayBuffer());
+    } catch(e) {}
+    if (!buf) {
       try {
-        var resp = await fetch(segUrls[i], { headers: headers });
-        if (resp.ok) buf = Buffer.from(await resp.arrayBuffer());
+        var pr2 = await ar2.get(segUrls[i], { headers: headers });
+        if (pr2.ok()) buf = await pr2.body();
       } catch(e) {}
-
-      if (!buf) {
-        try {
-          var pr2 = await ar2.get(segUrls[i], { headers: headers });
-          if (pr2.ok()) buf = await pr2.body();
-        } catch(e) {}
-      }
-
-      if (buf) {
-        res.write(buf);
-      } else {
-        console.log("[Stream] Segment failed:", i);
-      }
-    } catch(e) {
-      console.log("[Stream] Segment error:", i, e.message);
+    }
+    if (buf) {
+      res.write(buf);
+    } else {
+      console.log("[Stream] Segment failed:", i);
     }
   }
   res.end();
   console.log("[Stream] Done", info.code);
 }
 
+// ====== Express Server ======
 var app = express();
 
 app.get("/health", function(req, res) {
@@ -294,6 +256,7 @@ app.get("/proxy", function(req, res) {
   });
 });
 
+// ====== Telegram Bot ======
 var bot = new TelegramBot(BOT_TOKEN, { polling: false });
 setTimeout(function() {
   bot.startPolling().then(function() {
@@ -352,6 +315,7 @@ bot.on("message", async function(msg) {
   }
 });
 
+// ====== Start ======
 async function main() {
   await initBrowser();
   app.listen(PORT, function() {
