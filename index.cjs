@@ -11,30 +11,28 @@ var PROXY_HOST = process.env.RAILWAY_PUBLIC_DOMAIN
 var browser, ctx, pg;
 var browserReady = false;
 
-function isCfPage(title, content) {
-  var c = (title + " " + content).toLowerCase();
-  return c.indexOf("just a moment") !== -1
-    || c.indexOf("please wait") !== -1
-    || c.indexOf("attention required") !== -1
-    || c.indexOf("challenge") !== -1
-    || c.indexOf("cf-browser-verification") !== -1;
+function isCfPage(title) {
+  var t = title.toLowerCase();
+  return t.indexOf("just a moment") !== -1 || t.indexOf("please wait") !== -1 || t.indexOf("attention required") !== -1;
 }
 
-async function pageHasContent(page) {
+async function pageHasContent(page, requireM3u8) {
   var title = await page.title();
   var content = await page.content();
-  var hasM3u8 = content.indexOf("m3u8|") !== -1;
-  var isCf = isCfPage(title, content);
-  return { ok: hasM3u8 || (!isCf && content.indexOf("missav") !== -1), isCf: isCf, title: title };
+  var isCf = isCfPage(title);
+  if (isCf) return { ok: false, isCf: true, title: title };
+  if (requireM3u8) return { ok: content.indexOf("m3u8|") !== -1, isCf: false, title: title };
+  // For homepage, just check we're not on a CF page
+  return { ok: title.indexOf("MissAV") !== -1 || title.indexOf("missav") !== -1 || content.indexOf("missav") !== -1, isCf: false, title: title };
 }
 
-async function loadWithCfRetry(url) {
+async function loadWithCfRetry(url, requireM3u8) {
   for (var i = 0; i < 15; i++) {
     try {
       await pg.goto(url, { waitUntil: "domcontentloaded", timeout: 20000 });
     } catch(e) {}
     await pg.waitForTimeout(2000);
-    var s = await pageHasContent(pg);
+    var s = await pageHasContent(pg, requireM3u8);
     if (s.ok) {
       console.log("[Nav] OK:", s.title);
       return true;
@@ -84,7 +82,7 @@ async function initBrowser() {
 
 async function scrapeJav(code) {
   code = code.toUpperCase();
-  var ok = await loadWithCfRetry("https://missav.ai/" + code.toLowerCase());
+  var ok = await loadWithCfRetry("https://missav.ai/" + code.toLowerCase(), true);
   if (!ok) return null;
 
   var html = await pg.content();
