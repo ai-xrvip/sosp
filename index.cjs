@@ -51,10 +51,15 @@ async function loadWithCfRetry(url, requireM3u8) {
 
 async function initBrowser() {
   try {
-    browser = await chromium.launch({
+    var launchOpts = {
       headless: true,
       args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-blink-features=AutomationControlled", "--window-size=1920,1080"]
-    });
+    };
+    if (process.env.PROXY) {
+      launchOpts.args.push("--proxy-server=" + process.env.PROXY);
+      console.log("[Proxy] Using:", process.env.PROXY);
+    }
+    browser = await chromium.launch(launchOpts);
     ctx = await browser.newContext({
       userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
       viewport: { width: 1920, height: 1080 }
@@ -164,6 +169,12 @@ async function streamVideo(code, res) {
 
 var app = express();
 app.get("/health", function(req, res) { res.json({ ok: true, browser: browserReady }); });
+app.get("/proxy", function(req, res) {
+  var code = req.query.code;
+  if (!code) return res.status(400).json({ error: "Missing code" });
+  if (!browserReady) return res.status(503).json({ error: "Browser not ready" });
+  streamVideo(code, res).catch(function(e) { if (!res.headersSent) res.status(500).json({ error: e.message }); });
+});
 app.get("/proxy", function(req, res) {
   var code = req.query.code;
   if (!code) return res.status(400).json({ error: "Missing code" });
